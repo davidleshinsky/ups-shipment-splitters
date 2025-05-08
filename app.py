@@ -10,7 +10,7 @@ import base64
 REQUIRED_PASSWORD = "splitUPS2025"
 REQUIRED_COLUMNS = ["Reference Number(s)", "Manifest Date"]
 SENDGRID_API_KEY = st.secrets["SENDGRID_API_KEY"]
-FROM_EMAIL = "no-reply@jjsolutions.com"
+FROM_EMAIL = "david@jjsolutions.com"
 
 # --- AUTH ---
 st.set_page_config(page_title="UPS Splitter", layout="wide")
