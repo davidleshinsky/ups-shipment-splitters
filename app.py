@@ -2,11 +2,10 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-import zipfile
 import base64
 import requests
 
-st.set_page_config(page_title="UPS Shipment File Splitter", layout="wide")
+st.set_page_config(page_title="UPS Split & Email per Reference", layout="wide")
 
 # Password protection
 def check_password():
@@ -26,12 +25,12 @@ def check_password():
         st.stop()
 
 check_password()
-st.title("UPS Shipment File Splitter")
+st.title("UPS Splitter: Email Each Reference Separately")
 
 uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV)", type="csv")
-email = st.text_input("Enter your email to receive the ZIP (optional):")
+email = st.text_input("Enter your email to receive all individual reference files:")
 
-if uploaded_file:
+if uploaded_file and email:
     df = pd.read_csv(uploaded_file, dtype=str).fillna("")
     if "Reference Number(s)" not in df.columns or "Manifest Date" not in df.columns:
         st.error("CSV must contain 'Reference Number(s)' and 'Manifest Date' columns.")
@@ -43,20 +42,15 @@ if uploaded_file:
     except:
         pass
 
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for (ref, date), group in df.groupby(["Main Reference", "Manifest Date"]):
-            filename = f"{ref}_{date}.csv"
-            csv_bytes = group.drop(columns=["Main Reference"]).to_csv(index=False).encode("utf-8")
-            zipf.writestr(filename, csv_bytes)
-    zip_buffer.seek(0)
+    from_email = "davidl@jjsolutions.com"
+    api_key = st.secrets["SENDGRID_API_KEY"]
 
-    st.download_button("📥 Download ZIP", zip_buffer.getvalue(), file_name="split_shipments.zip")
+    status_log = []
 
-    if email and st.button("📤 Send ZIP by Email"):
-        from_email = "davidl@jjsolutions.com"
-        api_key = st.secrets["SENDGRID_API_KEY"]
-        encoded_file = base64.b64encode(zip_buffer.read()).decode()
+    for (ref, date), group in df.groupby(["Main Reference", "Manifest Date"]):
+        file_name = f"{ref}_{date}.csv"
+        csv_bytes = group.drop(columns=["Main Reference"]).to_csv(index=False).encode("utf-8")
+        encoded_file = base64.b64encode(csv_bytes).decode()
 
         response = requests.post(
             "https://api.sendgrid.com/v3/mail/send",
@@ -67,17 +61,24 @@ if uploaded_file:
             json={
                 "personalizations": [{"to": [{"email": email}]}],
                 "from": {"email": from_email},
-                "subject": "Your UPS Split ZIP File",
-                "content": [{"type": "text/plain", "value": "Please find your split shipment ZIP attached."}],
+                "subject": f"UPS Shipment File: {ref}",
+                "content": [{
+                    "type": "text/plain",
+                    "value": f"Attached is the CSV for Reference {ref} dated {date}."
+                }],
                 "attachments": [{
                     "content": encoded_file,
-                    "filename": "split_shipments.zip",
-                    "type": "application/zip",
+                    "filename": file_name,
+                    "type": "text/csv",
                     "disposition": "attachment"
                 }]
             }
         )
         if response.status_code == 202:
-            st.success("✅ Email sent successfully!")
+            status_log.append(f"✅ {file_name} sent.")
         else:
-            st.error(f"❌ Failed to send email. {response.status_code}: {response.text}")
+            status_log.append(f"❌ {file_name} failed ({response.status_code}): {response.text}")
+
+    st.markdown("### Email Results:")
+    for msg in status_log:
+        st.markdown(f"- {msg}")
