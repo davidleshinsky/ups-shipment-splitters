@@ -1,82 +1,63 @@
 
 import streamlit as st
 import pandas as pd
-import os
-import tempfile
+import io
 import zipfile
-import requests
+import base64
 
-# Send email using SendGrid
-def send_email(to_email, zip_path):
-    api_key = os.getenv("SENDGRID_API_KEY")
-    from_email = os.getenv("FROM_EMAIL")
+PASSWORD = "splitUPS2025"
 
-    with open(zip_path, "rb") as f:
-        zip_bytes = f.read()
-
-    import base64
-    encoded = base64.b64encode(zip_bytes).decode()
-
-    response = requests.post(
-        "https://api.sendgrid.com/v3/mail/send",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "personalizations": [{"to": [{"email": to_email}]}],
-            "from": {"email": from_email},
-            "subject": "Your split UPS shipment ZIP file",
-            "content": [{
-                "type": "text/plain",
-                "value": "Attached is your processed UPS file as a ZIP."
-            }],
-            "attachments": [{
-                "content": encoded,
-                "filename": os.path.basename(zip_path),
-                "type": "application/zip",
-                "disposition": "attachment"
-            }]
-        }
-    )
-    return response.status_code, response.text
-
-# Streamlit app UI
 st.set_page_config(page_title="UPS Shipment File Splitter")
-st.title("UPS Shipment File Splitter")
 
-password = st.text_input("Enter password to access the tool:", type="password")
-if password != "ups123":
-    st.stop()
+def check_password():
+    def password_entered():
+        if st.session_state["password"] == PASSWORD:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
 
-uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV or Excel)", type=["csv", "xlsx"])
-email = st.text_input("Enter your email to receive the ZIP:")
+    if "password_correct" not in st.session_state:
+        st.text_input("Enter password to access the tool:", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.text_input("Enter password to access the tool:", type="password", on_change=password_entered, key="password")
+        st.error("😕 Password incorrect")
+        return False
+    else:
+        return True
 
-if uploaded_file:
-    df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith("xlsx") else pd.read_csv(uploaded_file)
-    if "Main Reference" not in df.columns:
-        st.error("Missing required column: Main Reference")
-        st.stop()
+def process_file(uploaded_file):
+    df = pd.read_csv(uploaded_file)
+    if "Main Reference" not in df.columns or "Manifest Date" not in df.columns:
+        st.error("CSV must contain 'Main Reference' and 'Manifest Date' columns.")
+        return None
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir = Path(temp_dir)
-        for ref, group in df.groupby("Main Reference"):
-            out_path = temp_dir / f"{ref}.csv"
-            group.to_csv(out_path, index=False)
+    grouped = df.groupby(["Main Reference", "Manifest Date"])
+    output_zip = io.BytesIO()
 
-        zip_path = temp_dir / "split_files.zip"
-        with zipfile.ZipFile(zip_path, "w") as zipf:
-            for file in temp_dir.glob("*.csv"):
-                zipf.write(file, arcname=file.name)
+    with zipfile.ZipFile(output_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for (reference, date), group in grouped:
+            name = f"{reference}_{str(date).replace('/', '-')}.csv"
+            csv_bytes = group.to_csv(index=False).encode("utf-8")
+            zf.writestr(name, csv_bytes)
 
-        st.download_button("Download ZIP", zip_path.read_bytes(), file_name="split_files.zip")
+    output_zip.seek(0)
+    return output_zip
 
-        if st.button("Send ZIP by Email"):
-            if not email:
-                st.error("Enter a valid email address.")
-            else:
-                code, msg = send_email(email, zip_path)
-                if code == 202:
-                    st.success("Email sent successfully!")
-                else:
-                    st.error(f"Failed to send email: {msg}")
+def main():
+    if not check_password():
+        return
+
+    st.title("UPS Shipment File Splitter")
+    uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV)", type=["csv"])
+    
+    if uploaded_file:
+        zip_bytes = process_file(uploaded_file)
+        if zip_bytes:
+            b64 = base64.b64encode(zip_bytes.read()).decode()
+            href = f'<a href="data:application/zip;base64,{b64}" download="split_files.zip">📥 Download ZIP</a>'
+            st.markdown(href, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
