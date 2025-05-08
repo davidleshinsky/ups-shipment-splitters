@@ -1,11 +1,11 @@
-
 import streamlit as st
-import base64
 import pandas as pd
-import os
+import io
 import zipfile
-from sendgrid import SendGridAPIClient
+import base64
+import sendgrid
 from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
+import os
 
 st.set_page_config(page_title="UPS Shipment File Splitter", layout="wide")
 st.title("UPS Shipment File Splitter")
@@ -15,58 +15,54 @@ if password != st.secrets["APP_PASSWORD"]:
     st.stop()
 
 uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV or Excel)", type=["csv", "xlsx"])
-
 if uploaded_file:
     try:
         if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
-    except Exception as e:
-        st.error(f"Failed to read file: {e}")
+    except:
+        st.error("Failed to read file: 'Reference 1'")
         st.stop()
 
-    reference_col = "Reference Number(s)"
-    if reference_col not in df.columns:
-        st.error(f"Missing column '{reference_col}' in file.")
-        st.stop()
+    # Extract main reference and manifest date
+    df["Main Reference"] = df["Main Reference"].str.extract(r"([A-Z0-9]+)\s*-\s*([\d/]+)", expand=False)[0]
+    df["Manifest Date"] = pd.to_datetime(df["Manifest Date"], errors="coerce")
+    df["Sheet Name"] = df["Main Reference"].astype(str) + "_" + df["Manifest Date"].dt.strftime("%Y-%m-%d")
 
-    output_dir = "split_files"
-    os.makedirs(output_dir, exist_ok=True)
+    # Group and export
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zipf:
+        for name, group in df.groupby("Sheet Name"):
+            file_buffer = io.BytesIO()
+            group.to_excel(file_buffer, index=False)
+            zipf.writestr(f"{name}.xlsx", file_buffer.getvalue())
 
-    for ref, group in df.groupby(reference_col):
-        filename = f"{ref}.csv".replace("/", "_").replace("\\", "_")
-        group.to_csv(os.path.join(output_dir, filename), index=False)
-
-    zip_filename = "split_files.zip"
-    with zipfile.ZipFile(zip_filename, "w") as zipf:
-        for f in os.listdir(output_dir):
-            zipf.write(os.path.join(output_dir, f), arcname=f)
-
-    with open(zip_filename, "rb") as f:
-        st.download_button("Download ZIP", f.read(), file_name=zip_filename, mime="application/zip")
+    st.success("✅ File split successfully.")
+    st.download_button("📁 Download ZIP", zip_buffer.getvalue(), file_name="split_files.zip", mime="application/zip")
 
     email = st.text_input("Enter your email to receive the ZIP:")
-    if email and st.button("Send ZIP by Email"):
-        try:
-            message = Mail(
-                from_email=st.secrets["FROM_EMAIL"],
-                to_emails=email,
-                subject="Your UPS Shipment Split Files",
-                plain_text_content="Attached is your ZIP file containing split shipment data."
-            )
-            with open(zip_filename, "rb") as f:
-                data = f.read()
-            encoded_file = base64.b64encode(data).decode()
-            attached_file = Attachment(
-                FileContent(encoded_file),
-                FileName(zip_filename),
-                FileType("application/zip"),
-                Disposition("attachment")
-            )
-            message.attachment = attached_file
-            sg = SendGridAPIClient(st.secrets["SENDGRID_API_KEY"])
-            sg.send(message)
-            st.success("Email sent successfully.")
-        except Exception as e:
-            st.error(f"Failed to send email: {e}")
+    if st.button("📤 Send ZIP by Email"):
+        if email:
+            try:
+                sg = sendgrid.SendGridAPIClient(api_key=st.secrets["SENDGRID_API_KEY"])
+                message = Mail(
+                    from_email=st.secrets["FROM_EMAIL"],
+                    to_emails=email,
+                    subject="Split UPS File",
+                    plain_text_content="Attached is your split UPS tracking file ZIP.",
+                )
+                encoded = base64.b64encode(zip_buffer.getvalue()).decode()
+                attachment = Attachment(
+                    FileContent(encoded),
+                    FileName("split_files.zip"),
+                    FileType("application/zip"),
+                    Disposition("attachment"),
+                )
+                message.attachment = attachment
+                response = sg.send(message)
+                st.success("📨 Email sent successfully.")
+            except Exception as e:
+                st.error("❌ Failed to send email.")
+        else:
+            st.warning("⚠️ Please enter a valid email address.")
