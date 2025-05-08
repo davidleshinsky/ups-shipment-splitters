@@ -1,63 +1,47 @@
 
 import streamlit as st
 import pandas as pd
-import io
+from io import BytesIO
 import zipfile
-import base64
-
-PASSWORD = "splitUPS2025"
+from datetime import datetime
 
 st.set_page_config(page_title="UPS Shipment File Splitter")
 
-def check_password():
-    def password_entered():
-        if st.session_state["password"] == PASSWORD:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
+# Password protection
+PASSWORD = "splitUPS2025"
+with st.form("password_form"):
+    pw = st.text_input("Enter password to access the tool:", type="password")
+    submitted = st.form_submit_button("Submit")
+    if not submitted or pw != PASSWORD:
+        st.stop()
 
-    if "password_correct" not in st.session_state:
-        st.text_input("Enter password to access the tool:", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.text_input("Enter password to access the tool:", type="password", on_change=password_entered, key="password")
-        st.error("😕 Password incorrect")
-        return False
-    else:
-        return True
+st.title("UPS Shipment File Splitter")
+st.caption("Upload a UPS tracking CSV and download grouped shipments by Reference and Manifest Date.")
 
-def process_file(uploaded_file):
-    df = pd.read_csv(uploaded_file)
-    if "Main Reference" not in df.columns or "Manifest Date" not in df.columns:
-        st.error("CSV must contain 'Main Reference' and 'Manifest Date' columns.")
-        return None
+uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV)", type="csv")
 
-    grouped = df.groupby(["Main Reference", "Manifest Date"])
-    output_zip = io.BytesIO()
+if uploaded_file:
+    df = pd.read_csv(uploaded_file, dtype=str).fillna("")
+    if "Reference Number(s)" not in df.columns or "Manifest Date" not in df.columns:
+        st.error("CSV must contain 'Reference Number(s)' and 'Manifest Date' columns.")
+        st.stop()
 
-    with zipfile.ZipFile(output_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for (reference, date), group in grouped:
-            name = f"{reference}_{str(date).replace('/', '-')}.csv"
-            csv_bytes = group.to_csv(index=False).encode("utf-8")
-            zf.writestr(name, csv_bytes)
+    # Extract main reference as first token before semicolon or whitespace
+    df["Main Reference"] = df["Reference Number(s)"].str.extract(r"^([^;\s]+)")
 
-    output_zip.seek(0)
-    return output_zip
+    # Format Manifest Date if needed (e.g., from MM/DD/YYYY to MMDDYY)
+    try:
+        df["Manifest Date"] = pd.to_datetime(df["Manifest Date"]).dt.strftime("%m%d%y")
+    except:
+        pass  # Assume already formatted
 
-def main():
-    if not check_password():
-        return
+    # Group and write to ZIP
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for (ref, date), group in df.groupby(["Main Reference", "Manifest Date"]):
+            filename = f"{ref}_{date}.csv"
+            csv_bytes = group.drop(columns=["Main Reference"]).to_csv(index=False).encode("utf-8")
+            zipf.writestr(filename, csv_bytes)
 
-    st.title("UPS Shipment File Splitter")
-    uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV)", type=["csv"])
-    
-    if uploaded_file:
-        zip_bytes = process_file(uploaded_file)
-        if zip_bytes:
-            b64 = base64.b64encode(zip_bytes.read()).decode()
-            href = f'<a href="data:application/zip;base64,{b64}" download="split_files.zip">📥 Download ZIP</a>'
-            st.markdown(href, unsafe_allow_html=True)
-
-if __name__ == "__main__":
-    main()
+    st.success("Done! Download your ZIP file below:")
+    st.download_button("Download ZIP", zip_buffer.getvalue(), "split_shipments.zip", "application/zip")
