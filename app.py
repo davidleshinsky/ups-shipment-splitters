@@ -1,70 +1,99 @@
+
 import streamlit as st
 import pandas as pd
-import io
+import os
 import zipfile
+import tempfile
 import base64
-import sendgrid
-from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
+import requests
 
-st.set_page_config(page_title="UPS Shipment File Splitter", layout="wide")
+# Password protection
+PASSWORD = st.secrets["APP_PASSWORD"]
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    input_pwd = st.text_input("Enter password to access the tool:", type="password")
+    if input_pwd == PASSWORD:
+        st.session_state["authenticated"] = True
+        st.experimental_rerun()
+    else:
+        st.stop()
+
 st.title("UPS Shipment File Splitter")
 
-# Step 1: Password
-password = st.text_input("Enter password to access the tool:", type="password")
-if password != st.secrets["APP_PASSWORD"]:
-    st.stop()
-
-# Step 2: Upload File
 uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV or Excel)", type=["csv", "xlsx"])
-if uploaded_file:
+email = st.text_input("Enter your email to receive the ZIP:")
+
+def split_file(df):
+    grouped = df.groupby(["Reference Number", "Manifest Date"])
+    temp_dir = tempfile.mkdtemp()
+    paths = []
+
+    for (ref, date), group in grouped:
+        file_name = f"{ref}_{str(date).replace('/', '-')}.csv"
+        file_path = os.path.join(temp_dir, file_name)
+        group.to_csv(file_path, index=False)
+        paths.append(file_path)
+
+    return paths, temp_dir
+
+def zip_files(file_paths, zip_name="split_files.zip"):
+    zip_path = os.path.join(tempfile.gettempdir(), zip_name)
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for file in file_paths:
+            zipf.write(file, os.path.basename(file))
+    return zip_path
+
+def send_email(to_email, zip_path):
+    api_key = st.secrets["SENDGRID_API_KEY"]
+    from_email = st.secrets["FROM_EMAIL"]
+
+    with open(zip_path, "rb") as f:
+        zip_data = base64.b64encode(f.read()).decode()
+
+    response = requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "personalizations": [{"to": [{"email": to_email}]}],
+            "from": {"email": from_email},
+            "subject": "Your split UPS shipment ZIP file",
+            "content": [{
+                "type": "text/plain",
+                "value": "Attached is your processed UPS file as a ZIP."
+            }],
+            "attachments": [{
+                "content": zip_data,
+                "filename": os.path.basename(zip_path),
+                "type": "application/zip",
+                "disposition": "attachment"
+            }]
+        }
+    )
+    return response.status_code, response.text
+
+if uploaded_file and email:
     try:
-        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+        if uploaded_file.name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+
+        file_paths, folder = split_file(df)
+        zip_path = zip_files(file_paths)
+
+        with open(zip_path, "rb") as f:
+            st.download_button("Download ZIP", f, file_name="split_files.zip")
+
+        if st.button("Send ZIP by Email"):
+            status, result = send_email(email, zip_path)
+            if status == 202:
+                st.success("Email sent successfully.")
+            else:
+                st.error(f"Failed to send email: {status} {result}")
     except Exception as e:
-        st.error(f"❌ Failed to read file: {e}")
-        st.stop()
-
-    # Step 3: Detect Reference Column
-    ref_col = next((col for col in df.columns if "reference" in col.lower()), None)
-    if not ref_col:
-        st.error("❌ Could not find a column with 'reference' in the header.")
-        st.stop()
-
-    df["Main Reference"] = df[ref_col].astype(str).str.split(",").str[0].str.strip()
-
-    # Step 4: Create ZIP of grouped files
-    zip_buffer = io.BytesIO()
-    df["Manifest Date"] = pd.to_datetime(df.get("Manifest Date", pd.NaT), errors="coerce")
-    df["Sheet Name"] = df["Main Reference"] + "_" + df["Manifest Date"].dt.strftime("%Y-%m-%d")
-    with zipfile.ZipFile(zip_buffer, "w") as zipf:
-        for name, group in df.groupby("Sheet Name"):
-            file_buffer = io.BytesIO()
-            group.to_excel(file_buffer, index=False)
-            zipf.writestr(f"{name}.xlsx", file_buffer.getvalue())
-    zip_buffer.seek(0)
-
-    # Step 5: Allow ZIP download
-    st.download_button("📁 Download ZIP", zip_buffer.getvalue(), file_name="split_files.zip", mime="application/zip")
-
-    # Step 6: Email option
-    email = st.text_input("Enter your email to receive the ZIP:")
-    if email and st.button("📤 Send ZIP by Email"):
-        try:
-            sg = sendgrid.SendGridAPIClient(api_key=st.secrets["SENDGRID_API_KEY"])
-            message = Mail(
-                from_email=st.secrets["FROM_EMAIL"],
-                to_emails=email,
-                subject="Your Split UPS Tracking Files",
-                plain_text_content="Attached is your ZIP file containing the split UPS tracking data.",
-            )
-            encoded = base64.b64encode(zip_buffer.getvalue()).decode()
-            attachment = Attachment(
-                FileContent(encoded),
-                FileName("split_files.zip"),
-                FileType("application/zip"),
-                Disposition("attachment"),
-            )
-            message.attachment = attachment
-            sg.send(message)
-            st.success("📨 Email sent successfully.")
-        except Exception as e:
-            st.error(f"❌ Failed to send email: {e}")
+        st.error(f"An error occurred: {e}")
