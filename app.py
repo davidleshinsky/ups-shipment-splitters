@@ -4,10 +4,11 @@ import pandas as pd
 from io import BytesIO
 import zipfile
 import base64
+import requests
 
 st.set_page_config(page_title="UPS Shipment File Splitter", layout="wide")
 
-# Session-based password protection
+# Password protection
 def check_password():
     def password_entered():
         if st.session_state["password_input"] == st.secrets["APP_PASSWORD"]:
@@ -53,8 +54,7 @@ if uploaded_file:
     st.download_button("📥 Download ZIP", zip_buffer.getvalue(), file_name="split_shipments.zip")
 
     if email and st.button("📤 Send ZIP by Email"):
-        import requests
-        from_email = st.secrets["FROM_EMAIL"]
+        from_email = "davidl@jjsolutions.com"
         api_key = st.secrets["SENDGRID_API_KEY"]
         encoded_file = base64.b64encode(zip_buffer.read()).decode()
 
