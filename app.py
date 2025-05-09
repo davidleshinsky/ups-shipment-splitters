@@ -1,80 +1,89 @@
-
 import streamlit as st
 import pandas as pd
 import zipfile
 import io
 import os
-import sendgrid
+from collections import defaultdict
+from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
 import base64
 
-# CONFIGURATION
-PASSWORD = "splitUPS2025"
-SENDER_EMAIL = "davidl@jjsolutions.com"
-SENDGRID_API_KEY = st.secrets["SENDGRID_API_KEY"]
+st.set_page_config(page_title="UPS Splitter: Email or Download Per Main Reference")
 
-# Initialize session state
+# --- Password Protection ---
+PASSWORD = "splitUPS20253"
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
-st.title("UPS Splitter: Email or Download Per Main Reference")
-
-# Password protection
 if not st.session_state.authenticated:
-    password = st.text_input("Enter password to access:", type="password")
-    if password == PASSWORD:
+    pwd = st.text_input("Enter password to access:", type="password")
+    if pwd == PASSWORD:
         st.session_state.authenticated = True
-        st.experimental_rerun()
+        st.rerun()
     else:
         st.stop()
 
-# File upload + email input
-uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV)", type="csv")
-recipient_email = st.text_input("Your email address (for ZIPs):")
+st.title("UPS Splitter: Email or Download Per Main Reference")
+
+uploaded_file = st.file_uploader("Upload UPS Tracking File (CSV)", type=["csv"])
+email_address = st.text_input("Enter your email to receive ZIPs (optional)")
 
 if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    required_cols = {"Main Reference", "Manifest Date"}
-    if not required_cols.issubset(df.columns):
+    df = pd.read_csv(uploaded_file, dtype=str)
+    if "Main Reference" not in df.columns or "Manifest Date" not in df.columns:
         st.error("CSV must contain 'Main Reference' and 'Manifest Date' columns.")
         st.stop()
 
-    grouped = df.groupby(["Main Reference", "Manifest Date"])
+    grouped = defaultdict(list)
+    for _, row in df.iterrows():
+        main_ref = row["Main Reference"]
+        manifest = row["Manifest Date"]
+        grouped[(main_ref, manifest)].append(row)
+
     results = []
-
-    for (main_ref, manifest_date), group in grouped:
-        filename = f"{main_ref}_{manifest_date.replace('/', '-')}.csv"
+    for (main_ref, manifest), rows in grouped.items():
+        out_df = pd.DataFrame(rows)
+        filename = f"{main_ref}_{manifest}.csv"
+        buffer = io.StringIO()
+        out_df.to_csv(buffer, index=False)
         zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zf:
-            zf.writestr(filename, group.to_csv(index=False))
-        zip_bytes = zip_buffer.getvalue()
+        with zipfile.ZipFile(zip_buffer, "w") as zipf:
+            zipf.writestr(filename, buffer.getvalue())
+        zip_buffer.seek(0)
 
-        with st.expander(f"📦 {filename}"):
-            st.download_button("⬇️ Download ZIP", data=zip_bytes, file_name=f"{filename}.zip", mime="application/zip")
+        st.subheader(f"{main_ref} — {manifest}")
 
-            if recipient_email:
-                if st.button(f"📧 Email ZIP for {main_ref}", key=filename):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label=f"📥 Download ZIP",
+                data=zip_buffer.getvalue(),
+                file_name=f"{main_ref}_{manifest}.zip",
+                mime="application/zip"
+            )
+        with col2:
+            if email_address:
+                send = st.button(f"📧 Send to {email_address}", key=f"{main_ref}_{manifest}")
+                if send:
                     try:
-                        sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
-                        attachment = Attachment()
-                        attachment.file_content = FileContent(base64.b64encode(zip_bytes).decode())
-                        attachment.file_type = FileType("application/zip")
-                        attachment.file_name = FileName(f"{filename}.zip")
-                        attachment.disposition = Disposition("attachment")
-
+                        sg = SendGridAPIClient(os.environ["SENDGRID_API_KEY"])
+                        encoded = base64.b64encode(zip_buffer.getvalue()).decode()
+                        attachment = Attachment(
+                            FileContent(encoded),
+                            FileName(f"{main_ref}_{manifest}.zip"),
+                            FileType("application/zip"),
+                            Disposition("attachment")
+                        )
                         message = Mail(
-                            from_email=SENDER_EMAIL,
-                            to_emails=recipient_email,
-                            subject=f"UPS ZIP: {filename}",
-                            plain_text_content="Your UPS ZIP file is attached.",
+                            from_email="davidl@jjsolutions.com",
+                            to_emails=email_address,
+                            subject=f"UPS ZIP: {main_ref} | {manifest}",
+                            plain_text_content="Your ZIP is attached."
                         )
                         message.attachment = attachment
                         response = sg.send(message)
-
-                        if response.status_code == 202:
-                            st.success("✅ Email sent successfully.")
-                        else:
-                            st.error(f"❌ Email failed ({response.status_code}): {response.body}")
-
+                        st.success(f"Sent to {email_address} (Status {response.status_code})")
                     except Exception as e:
-                        st.error(f"❌ Email error: {str(e)}")
+                        st.error(f"❌ Failed to send: {e}")
+            else:
+                st.info("Enter your email above to enable sending.")
